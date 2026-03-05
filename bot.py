@@ -1,6 +1,7 @@
 import os
 import asyncio
 import requests
+import sqlite3
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
@@ -13,78 +14,79 @@ CG_API_KEY = os.getenv('CG_API_KEY')
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# Хранилище для уведомлений (в памяти)
-alerts = {} 
+# --- РАБОТА С БАЗОЙ ДАННЫХ ---
+def init_db():
+    conn = sqlite3.connect('crypto_bot.db')
+    cursor = conn.cursor()
+    # Таблица для алертов: ID юзера, цель, цена в момент установки
+    cursor.execute('''CREATE TABLE IF NOT EXISTS alerts 
+                      (user_id INTEGER, target_price REAL, start_price REAL)''')
+    # Таблица для избранного: ID юзера, ID монеты
+    cursor.execute('''CREATE TABLE IF NOT EXISTS favorites 
+                      (user_id INTEGER, coin_id TEXT)''')
+    conn.commit()
+    conn.close()
 
-# --- КЛАВИАТУРА ---
-def get_main_keyboard():
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="BTC 🟠"), KeyboardButton(text="ETH 🔵")],
-            [KeyboardButton(text="📈 Индекс Страха/Жадности"), KeyboardButton(text="❓ Помощь")]
-        ],
-        resize_keyboard=True
-    )
-    return keyboard
-
-# --- ПОЛУЧЕНИЕ ЦЕН ---
-def get_crypto_data(coin_id):
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+def get_crypto_data(coin_ids):
+    """Получает данные по списку монет (через запятую)"""
+    url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_ids}&vs_currencies=usd&include_24hr_change=true"
     headers = {"x-cg-demo-api-key": CG_API_KEY}
     try:
         response = requests.get(url, headers=headers, timeout=10)
-        return response.json().get(coin_id)
-    except: return None
+        return response.json()
+    except Exception as e:
+        print(f"Ошибка API: {e}")
+        return None
 
-# --- ФОНОВАЯ ПРОВЕРКА ЦЕНЫ ---
-async def check_alerts():
+def get_main_keyboard():
+    buttons = [
+        [KeyboardButton(text="BTC 🟠"), KeyboardButton(text="ETH 🔵")],
+        [KeyboardButton(text="⭐ Мой список"), KeyboardButton(text="📈 Индекс")],
+        [KeyboardButton(text="❓ Помощь")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+
+# --- ЛОГИКА АЛЕРТОВ ---
+async def check_alerts_loop():
     while True:
-        await asyncio.sleep(60) # Проверяем раз в минуту
-        if not alerts: continue
+        await asyncio.sleep(60) # Проверка раз в минуту
+        conn = sqlite3.connect('crypto_bot.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, target_price, start_price FROM alerts")
+        all_alerts = cursor.fetchall()
         
-        data = get_crypto_data("bitcoin")
-        if data:
-            current_price = data['usd']
-            for user_id, target_price in list(alerts.items()):
-                if current_price <= target_price:
-                    await bot.send_message(user_id, f"🔔 **ALERT!**\nBitcoin упал до `${current_price:,}`\nТвоя цель `${target_price:,}` достигнута! 🚀")
-                    del alerts[user_id] # Удаляем, чтобы не спамить
+        if all_alerts:
+            # Для простоты проверяем пока только BTC в алертах
+            data = get_crypto_data("bitcoin")
+            if data:
+                current_price = data['bitcoin']['usd']
+                for user_id, target, start in all_alerts:
+                    is_hit = False
+                    msg = ""
+                    
+                    if target > start and current_price >= target: # Ждали роста
+                        is_hit = True
+                        msg = f"🚀 **ЦЕЛЬ ДОСТИГНУТА (РОСТ)!**\nBitcoin: `${current_price:,}`\nТвой порог `${target:,}` пробит вверх!"
+                    elif target < start and current_price <= target: # Ждали падения
+                        is_hit = True
+                        msg = f"📉 **ЦЕЛЬ ДОСТИГНУТА (ПАДЕНИЕ)!**\nBitcoin: `${current_price:,}`\nТвой порог `${target:,}` достигнут!"
+                    
+                    if is_hit:
+                        await bot.send_message(user_id, msg, parse_mode="Markdown")
+                        cursor.execute("DELETE FROM alerts WHERE user_id = ? AND target_price = ?", (user_id, target))
+        conn.commit()
+        conn.close()
 
 # --- ОБРАБОТЧИКИ ---
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("Я слежу за рынком. Чтобы поставить уведомление на BTC, напиши:\n`/alert 90000`", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer(
+        "👋 Бот обновлен!\n\n"
+        "📍 `/alert 75000` — поставить уведомление на BTC\n"
+        "📍 `/add solana` — добавить монету в Избранное",
+        reply_markup=get_main_keyboard()
+    )
 
 @dp.message(Command("alert"))
-async def set_alert(message: types.Message):
-    try:
-        price = int(message.text.split()[1])
-        alerts[message.from_user.id] = price
-        await message.answer(f"✅ Ок! Я напишу тебе, когда Bitcoin упадет до ${price:,}")
-    except:
-        await message.answer("Ошибка! Напиши команду вот так: `/alert 90000` (только число)")
-
-@dp.message()
-async def handle_all(message: types.Message):
-    text = message.text.lower()
-    if "btc" in text:
-        data = get_crypto_data("bitcoin")
-        if data: await message.answer(f"BTC: `${data['usd']:,}`", parse_mode="Markdown")
-    elif "индекс" in text:
-        # (Тут остается твоя функция индекса из прошлого шага)
-        await message.answer("Индекс работает! (код сокращен для краткости)")
-
-# --- ВЕБ-СЕРВЕР И ЗАПУСК ---
-async def handle(request): return web.Response(text="OK")
-
-async def main():
-    asyncio.create_task(check_alerts()) # Запускаем "слежку" в фоне
-    app = web.Application()
-    app.router.add_get('/', handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    await web.TCPSite(runner, '0.0.0.0', int(os.getenv("PORT", 8080))).start()
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+async def
