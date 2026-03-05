@@ -35,43 +35,71 @@ def get_main_keyboard():
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("Бот запущен! 🚀\n`/alert 70000` - алерт на BTC\n`/add solana` - в список", reply_markup=get_main_keyboard())
+    await message.answer("Бот готов! 🚀\n\nКоманды:\n`/alert 75000` — алерт на BTC\n`/add solana` — в список", reply_markup=get_main_keyboard(), parse_mode="Markdown")
+
+@dp.message(Command("alert"))
+async def set_alert(message: types.Message):
+    try:
+        target = float(message.text.split()[1])
+        res = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd").json()
+        current = res['bitcoin']['usd']
+        conn = sqlite3.connect('crypto_bot.db')
+        cursor = conn.cursor()
+        cursor.execute('INSERT INTO alerts VALUES (?, ?, ?)', (message.from_user.id, target, current))
+        conn.commit()
+        conn.close()
+        await message.answer(f"✅ Ок! Слежу. Сейчас BTC: ${current:,}. Жду ${target:,}")
+    except:
+        await message.answer("Пиши так: `/alert 70000`")
+
+@dp.message(Command("add"))
+async def add_coin(message: types.Message):
+    try:
+        coin = message.text.split()[1].lower()
+        conn = sqlite3.connect('crypto_bot.db')
+        cursor = conn.cursor()
+        cursor.execute('INSERT INTO favorites VALUES (?, ?)', (message.from_user.id, coin))
+        conn.commit()
+        conn.close()
+        await message.answer(f"⭐ Монета `{coin}` добавлена в список!", parse_mode="Markdown")
+    except:
+        await message.answer("Пиши так: `/add solana`")
 
 @dp.message()
-async def handle_all(message: types.Message):
+async def handle_text(message: types.Message):
     text = message.text.lower()
     if "btc" in text:
-        try:
-            res = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd", headers={"x-cg-demo-api-key": CG_API_KEY}).json()
-            price = res['bitcoin']['usd']
-            await message.answer(f"BTC: ${price:,}")
-        except:
-            await message.answer("Ошибка связи с биржей")
+        res = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd").json()
+        await message.answer(f"BTC: ${res['bitcoin']['usd']:,}")
+    elif "мой список" in text:
+        conn = sqlite3.connect('crypto_bot.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT coin_id FROM favorites WHERE user_id = ?', (message.from_user.id,))
+        coins = [r[0] for r in cursor.fetchall()]
+        conn.close()
+        if not coins:
+            await message.answer("Список пуст! Добавь монеты командой `/add`")
+        else:
+            ids = ",".join(list(set(coins)))
+            data = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={ids}&vs_currencies=usd").json()
+            res = "📊 **Твой список:**\n"
+            for c, v in data.items():
+                res += f"• {c.capitalize()}: ${v['usd']:,}\n"
+            await message.answer(res, parse_mode="Markdown")
     elif "индекс" in text:
-        try:
-            res = requests.get("https://api.alternative.me/fng/").json()
-            val = res['data'][0]['value']
-            await message.answer(f"📈 Индекс страха: {val}/100")
-        except:
-            await message.answer("Ошибка получения индекса")
+        r = requests.get("https://api.alternative.me/fng/").json()
+        await message.answer(f"📈 Индекс: {r['data'][0]['value']}/100")
     else:
-        await message.answer("Используй кнопки меню", reply_markup=get_main_keyboard())
+        await message.answer("Используй кнопки меню или команды /alert и /add")
 
-async def handle(request):
-    return web.Response(text="Бот активен")
+async def handle(request): return web.Response(text="OK")
 
 async def main():
     init_db()
-    # Чистим старые подключения, чтобы не было ошибки Conflict
     await bot.delete_webhook(drop_pending_updates=True)
-    
-    app = web.Application()
-    app.router.add_get('/', handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.getenv("PORT", 8080))
-    await web.TCPSite(runner, '0.0.0.0', port).start()
-    
+    app = web.Application(); app.router.add_get('/', handle)
+    runner = web.AppRunner(app); await runner.setup()
+    await web.TCPSite(runner, '0.0.0.0', int(os.getenv("PORT", 8080))).start()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
