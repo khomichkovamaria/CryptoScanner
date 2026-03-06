@@ -1,42 +1,55 @@
 import asyncio
-import os
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
 from aiohttp import web
-
-# Импортируем наши модули
 import config
 from database import init_db
-from handlers import common
 
-# Инициализация бота и диспетчера
+# Инициализация
 bot = Bot(token=config.API_TOKEN)
 dp = Dispatcher()
 
-# Регистрация роутеров (наших обработчиков)
-dp.include_router(common.router)
+# Главное меню
+def get_main_menu():
+    kb = [
+        [types.KeyboardButton(text="🔍 Найти монету"), types.KeyboardButton(text="⭐ Избранное")],
+        [types.KeyboardButton(text="📊 Индикаторы"), types.KeyboardButton(text="❓ Помощь")]
+    ]
+    return types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-# --- ВЕБ-СЕРВЕР ДЛЯ HEALTH CHECK (Нужен для Render) ---
-async def handle(request):
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await message.answer("Бот обновлен! 🚀\nИспользуйте меню ниже:", reply_markup=get_main_menu())
+
+@dp.message(F.text == "❓ Помощь")
+async def cmd_help(message: types.Message):
+    await message.answer("Введите название монеты (например, bitcoin или ethereum), чтобы получить текущий курс.")
+
+@dp.message(F.text == "🔍 Найти монету")
+async def find_coin_start(message: types.Message):
+    await message.answer("Напишите название монеты латиницей (например: bitcoin)")
+
+# Простейший поиск (пока без API, просто проверка связи)
+@dp.message()
+async def handle_any_text(message: types.Message):
+    if message.text:
+        await message.answer(f"Ищу информацию по запросу: {message.text}...\n(На следующем шаге я подключу сюда реальные цены Coingecko!)")
+
+# Настройка Web-сервера для Render
+async def handle_web(request):
     return web.Response(text="Bot is running")
 
 async def main():
-    # 1. Запускаем базу данных (создаем таблицы)
     await init_db()
-    
-    # 2. Запускаем веб-сервер на фоне
     app = web.Application()
-    app.router.add_get('/', handle)
+    app.router.add_get("/", handle_web)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', config.PORT)
     await site.start()
     
-    # 3. Запускаем бота
-    await bot.delete_webhook(drop_pending_updates=True)
+    print("Bot is starting polling...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        print("Бот остановлен")
+    asyncio.run(main())
