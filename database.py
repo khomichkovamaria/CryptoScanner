@@ -1,21 +1,20 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import Column, String, BigInteger
+from sqlalchemy.orm import sessionmaker
 import config
 
-Base = declarative_base()
+# Добавляем параметр statement_cache_size=0 для совместимости с PgBouncer
+engine = create_async_engine(
+    config.DATABASE_URL,
+    echo=True,
+    prepared_statement_cache_size=0  # Это решит проблему DuplicatePreparedStatementError
+)
 
-# Подключаемся к Supabase через URL из конфига
-engine = create_async_engine(config.DATABASE_URL, echo=False)
-async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
-
-class User(Base):
-    """Таблица пользователей (создастся сама)"""
-    __tablename__ = 'users'
-    user_id = Column(BigInteger, primary_key=True)
-    username = Column(String, nullable=True)
+async_session = sessionmaker(
+    engine, class_=AsyncSession, expire_on_commit=False
+)
 
 async def init_db():
-    """Эта функция 'будит' базу при старте бота"""
+    # Здесь можно добавить создание таблиц через Base.metadata.create_all
+    # Но для теста пока оставляем просто подключение
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        print("База данных успешно подключена!")
