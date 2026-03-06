@@ -1,3 +1,5 @@
-aiogram
-requests
+aiogram==3.14.0
 aiohttp
+requests
+sqlalchemy[asyncio]
+asyncpg
