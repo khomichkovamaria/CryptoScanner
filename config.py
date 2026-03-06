@@ -5,7 +5,7 @@ CG_API_KEY = os.getenv('CG_API_KEY')
 DATABASE_URL = os.getenv('DATABASE_URL')
 
 if DATABASE_URL:
-    # Просто меняем протокол на асинхронный
+    # Исправляем только протокол, так как хвост ты уже удалила вручную
     if DATABASE_URL.startswith("postgresql://"):
         DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
