@@ -5,13 +5,12 @@ from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiohttp import web
 import config
-from database import init_db, add_favorite, get_favorites, is_favorite, remove_favorite
+import database # Импортируем весь модуль
 
 bot = Bot(token=config.API_TOKEN)
 dp = Dispatcher()
 
-# --- API Логика ---
-
+# --- API ---
 async def get_coin_data(coin_id: str):
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id.lower().strip()}"
     params = {"tickers": "false", "market_data": "true", "community_data": "false", "developer_data": "false"}
@@ -26,9 +25,8 @@ async def get_coin_data(coin_id: str):
                         "change": data["market_data"]["price_change_percentage_24h"],
                         "ticker": data["symbol"].upper()
                     }
-                return None
-    except:
-        return None
+    except: pass
+    return None
 
 async def get_multi_rsi(coin_id: str):
     intervals = {"1ч": "1", "4ч": "2", "1д": "14"}
@@ -49,134 +47,78 @@ async def get_multi_rsi(coin_id: str):
                         rsi = 100 - (100 / (1 + (avg_g / (avg_l or 1))))
                         status = "🔴" if rsi > 70 else "🟢" if rsi < 30 else "⚪️"
                         results.append(f"{status} **{label}**: `{rsi:.1f}`")
-                    else:
-                        results.append(f"⚠️ {label}: нет данных")
-            except:
-                results.append(f"⚠️ {label}: ошибка")
-    return "\n".join(results)
+            except: results.append(f"⚠️ {label}: ошибка")
+    return "\n".join(results) or "Нет данных для анализа"
 
-# --- Клавиатуры (БЕЗ кнопки Индикаторы) ---
-
+# --- Клавиатуры ---
 def get_main_menu():
-    kb = [
-        [types.KeyboardButton(text="🔍 Найти монету"), types.KeyboardButton(text="⭐ Избранное")],
-        [types.KeyboardButton(text="❓ Помощь")]
-    ]
+    kb = [[types.KeyboardButton(text="🔍 Найти монету"), types.KeyboardButton(text="⭐ Избранное")], [types.KeyboardButton(text="❓ Помощь")]]
     return types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Бот-аналитик запущен! 📈", reply_markup=get_main_menu())
-
-# --- Карточка монеты ---
+    await message.answer("Бот-аналитик готов! 📈", reply_markup=get_main_menu())
 
 async def send_coin_card(message: types.Message, coin_id: str, edit_message=None):
     data = await get_coin_data(coin_id)
     if data:
-        is_fav = await is_favorite(message.chat.id, coin_id)
+        is_fav = await database.is_favorite(message.chat.id, coin_id)
         builder = InlineKeyboardBuilder()
-        builder.row(types.InlineKeyboardButton(
-            text="🗑 Удалить" if is_fav else "⭐ В избранное", 
-            callback_data=f"{'rem' if is_fav else 'fav'}_{coin_id}_{data['ticker']}")
-        )
+        builder.row(types.InlineKeyboardButton(text="🗑 Удалить" if is_fav else "⭐ В избранное", callback_data=f"{'rem' if is_fav else 'fav'}_{coin_id}_{data['ticker']}"))
         builder.row(types.InlineKeyboardButton(text="📊 Тех. анализ (RSI)", callback_data=f"tf_{coin_id}"))
-
-        res = (
-            f"💰 **{coin_id.upper()} ({data['ticker']})**\n\n"
-            f"💵 Цена: `${data['price']:,.2f}`\n"
-            f"{'📈' if data['change']>=0 else '📉'} 24ч: `{data['change']:.2f}%`"
-        )
-        if edit_message:
-            await edit_message.edit_text(res, parse_mode="Markdown", reply_markup=builder.as_markup())
-        else:
-            await message.answer(res, parse_mode="Markdown", reply_markup=builder.as_markup())
+        res = f"💰 **{coin_id.upper()} ({data['ticker']})**\n\n💵 Цена: `${data['price']:,.2f}`\n{'📈' if data['change']>=0 else '📉'} 24ч: `{data['change']:.2f}%`"
+        if edit_message: await edit_message.edit_text(res, parse_mode="Markdown", reply_markup=builder.as_markup())
+        else: await message.answer(res, parse_mode="Markdown", reply_markup=builder.as_markup())
     else:
-        err = "❌ Монета не найдена. Проверьте ID (напр. `bitcoin`, `solana`)."
-        if edit_message: await edit_message.edit_text(err)
-        else: await message.answer(err)
-
-# --- Избранное (Защищенная версия) ---
+        err = f"❌ Монета `{coin_id}` не найдена."
+        if edit_message: await edit_message.edit_text(err, parse_mode="Markdown")
+        else: await message.answer(err, parse_mode="Markdown")
 
 @dp.message(F.text == "⭐ Избранное")
 async def show_favorites(message: types.Message):
-    favs = await get_favorites(message.from_user.id)
-    if not favs:
-        return await message.answer("Список избранного пуст.")
-    
+    favs = await database.get_favorites(message.from_user.id)
+    if not favs: return await message.answer("Список избранного пуст.")
     builder = InlineKeyboardBuilder()
-    for row in favs:
-        # ПРОВЕРКА: если в ряду 2 значения, берем оба. Если 1 - берем его как ID и Тикер.
-        try:
-            if len(row) >= 2:
-                c_id, ticker = row[0], row[1]
-            else:
-                c_id = row[0]
-                ticker = c_id.upper()
-        except:
-            c_id = str(row)
-            ticker = c_id.upper()
-            
-        builder.add(types.InlineKeyboardButton(text=ticker, callback_data=f"price_{c_id}"))
-    
+    for item in favs:
+        # Используем ключи словаря, это на 100% исключает ошибку "одной буквы"
+        builder.add(types.InlineKeyboardButton(text=item['ticker'], callback_data=f"price_{item['coin_id']}"))
     builder.adjust(3)
     await message.answer("⭐ Ваше избранное:", reply_markup=builder.as_markup())
 
-@dp.message(F.text == "❓ Помощь")
-async def cmd_help(message: types.Message):
-    await message.answer("Просто напишите название монеты (напр. `ethereum`).\n\nВ разделе ⭐ Избранное вы найдете свои монеты, а внутри каждой — кнопку 📊 Тех. анализ.")
-
 @dp.message(F.text == "🔍 Найти монету")
 async def find_prompt(message: types.Message):
-    await message.answer("Введите ID монеты латиницей:")
-
-# --- Обработка текста ---
+    await message.answer("Введите ID монеты (напр. `bitcoin`):")
 
 @dp.message()
 async def handle_text(message: types.Message):
-    if not message.text or message.text.startswith("/") or message.text in ["🔍 Найти монету", "⭐ Избранное", "❓ Помощь"]:
-        return
+    if not message.text or message.text in ["🔍 Найти монету", "⭐ Избранное", "❓ Помощь"]: return
     msg = await message.answer(f"🔍 Ищу `{message.text}`...")
     await send_coin_card(message, message.text, edit_message=msg)
-
-# --- Callbacks ---
 
 @dp.callback_query(F.data.startswith("tf_"))
 async def show_analysis(callback: types.CallbackQuery):
     coin_id = callback.data.split("_")[1]
     await callback.answer("📊 Считаю...")
     analysis = await get_multi_rsi(coin_id)
-    await callback.message.answer(f"📊 **Анализ {coin_id.upper()}:**\n\n{analysis}\n\n📍 *30 - Buy, 70 - Sell*", parse_mode="Markdown")
+    await callback.message.answer(f"📊 **Анализ {coin_id.upper()}:**\n\n{analysis}", parse_mode="Markdown")
 
 @dp.callback_query(F.data.contains("fav_") or F.data.contains("rem_"))
 async def handle_fav(callback: types.CallbackQuery):
-    parts = callback.data.split("_")
-    action, coin_id = parts[0], parts[1]
-    ticker = parts[2] if len(parts) > 2 else coin_id.upper()
-    
-    if action == "fav":
-        await add_favorite(callback.from_user.id, coin_id, ticker)
-        await callback.answer(f"✅ {ticker} добавлен")
-    else:
-        await remove_favorite(callback.from_user.id, coin_id)
-        await callback.answer(f"🗑 {ticker} удален")
-    
+    action, coin_id, ticker = callback.data.split("_")
+    if action == "fav": await database.add_favorite(callback.from_user.id, coin_id, ticker)
+    else: await database.remove_favorite(callback.from_user.id, coin_id)
+    await callback.answer("Готово!")
     await send_coin_card(callback.message, coin_id, edit_message=callback.message)
 
 @dp.callback_query(F.data.startswith("price_"))
 async def price_call(callback: types.CallbackQuery):
-    coin_id = callback.data.split("_")[1]
-    await send_coin_card(callback.message, coin_id)
     await callback.answer()
-
-# --- Запуск ---
-
-async def handle_web(request):
-    return web.Response(text="OK")
+    await send_coin_card(callback.message, callback.data.split("_")[1])
 
 async def main():
-    await init_db()
+    await database.init_db()
     app = web.Application()
-    app.router.add_get("/", handle_web)
+    app.router.add_get("/", lambda r: web.Response(text="OK"))
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', config.PORT).start()
